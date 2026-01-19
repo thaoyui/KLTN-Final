@@ -1,4 +1,5 @@
-const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:3001';
+// Use relative path in production (via nginx proxy), absolute URL for local dev
+const API_BASE_URL = process.env.REACT_APP_API_URL || '';
 
 export interface InventoryNode {
     name: string;

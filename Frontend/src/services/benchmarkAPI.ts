@@ -1,4 +1,7 @@
-const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:3001';
+// Use relative path in production (via nginx proxy), absolute URL for local dev
+// In Docker: nginx proxies /api to http://unified-backend:3001
+// Local dev: use http://localhost:3001
+const API_BASE_URL = process.env.REACT_APP_API_URL || '';
 
 export interface BenchmarkSelection {
   id: string;
