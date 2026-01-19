@@ -1,0 +1,85 @@
+---
+# Optimized Kube-check Scan
+- name: Run Kube-check Scan (Optimized)
+  hosts: "{{ node_name | default('all') }}"
+  gather_facts: no
+  strategy: linear
+
+  vars:
+    kubecheck_path_remote: "{{ kubecheck_path | default('/home/' + ansible_user + '/Kube-check') }}"
+    reports_path_remote: "{{ reports_path | default(kubecheck_path_remote + '/reports') }}"
+    check_ids: "{{ check_ids | default([]) }}"
+    output_fmt: "{{ output_format | default('json') }}"
+
+  tasks:
+    # ==========================================================
+    # VERIFY BOOTSTRAP (FAST)
+    # ==========================================================
+    - name: Verify kube-check and venv exist
+      stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ kubecheck_path_remote }}/src"
+        - "{{ kubecheck_path_remote }}/venv"
+      register: bootstrap_check
+
+    - name: Fail if kube-check not bootstrapped
+      fail:
+        msg: "Kube-check not bootstrapped on {{ inventory_hostname }}"
+      when: not (bootstrap_check.results[0].stat.exists and bootstrap_check.results[1].stat.exists)
+
+    - name: Ensure reports directory exists
+      file:
+        path: "{{ reports_path_remote }}"
+        state: directory
+        mode: '0755'
+
+    # ==========================================================
+    # RUN SCAN - Chỉ đo execution time (quan trọng nhất)
+    # ==========================================================
+    - name: Record pre-execution time
+      set_fact:
+        timing_pre_exec: "{{ lookup('pipe', 'date +%s') }}"
+
+    - name: Run kube-check scan
+      command: >
+        {{ kubecheck_path_remote }}/venv/bin/python
+        {{ kubecheck_path_remote }}/src/main.py
+        run
+        {% if check_ids | length > 0 %} --check {{ check_ids | join(',') }}{% endif %}
+        --output-format {{ output_fmt }}
+        --output-file {{ reports_path_remote }}/scan_{{ inventory_hostname }}_{{ timing_pre_exec }}.json
+      register: scan_result
+      failed_when: false
+      changed_when: false
+      environment:
+        PYTHONDONTWRITEBYTECODE: "1"
+        PYTHONUNBUFFERED: "1"
+      args:
+        chdir: "{{ kubecheck_path_remote }}"
+
+    - name: Record post-execution time
+      set_fact:
+        timing_post_exec: "{{ lookup('pipe', 'date +%s') }}"
+
+    # ==========================================================
+    # FETCH RESULT
+    # ==========================================================
+    - name: Fetch scan report
+      fetch:
+        src: "{{ reports_path_remote }}/scan_{{ inventory_hostname }}_{{ timing_pre_exec }}.json"
+        dest: "/tmp/kube-check-reports/"
+        flat: yes
+        validate_checksum: no
+
+    # ==========================================================
+    # OUTPUT TIMING (chỉ execution time từ playbook)
+    # Connection và fetch time sẽ được tính ở Python backend
+    # ==========================================================
+    - name: Calculate execution timing
+      set_fact:
+        timing_execution: "{{ (timing_post_exec | int) - (timing_pre_exec | int) }}"
+
+    - name: Output execution timing JSON (for parser)
+      debug:
+        msg: "SCAN_TIMING_JSON_START{{ {'execution_seconds': timing_execution} | to_json }}SCAN_TIMING_JSON_END"

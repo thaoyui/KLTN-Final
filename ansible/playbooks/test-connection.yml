@@ -1,0 +1,53 @@
+---
+# Test connection to K8s cluster nodes
+- name: Test K8s Cluster Connection
+  hosts: all
+  gather_facts: yes
+  tasks:
+    - name: Test SSH connection
+      ping:
+      register: ping_result
+
+    - name: Check kubectl availability
+      command: which kubectl
+      register: kubectl_check
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Check kubeconfig
+      stat:
+        path: "{{ kubeconfig_path | default('/root/.kube/config') }}"
+      register: kubeconfig_stat
+
+    - name: Test kubectl connection
+      command: kubectl get nodes
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path | default('/root/.kube/config') }}"
+      register: kubectl_result
+      ignore_errors: yes
+      when: (kubectl_check is defined) and (kubectl_check.rc == 0) and (kubeconfig_stat is defined and kubeconfig_stat.stat.exists)
+
+    - name: Display connection results
+      debug:
+        msg:
+          - "SSH Connection: {{ 'OK' if (ping_result is defined and (ping_result.ping is defined and ping_result.ping == 'pong')) else 'FAILED' }}"
+          - "Kubectl available: {{ 'Yes' if (kubectl_check is defined and (('rc' in kubectl_check) and kubectl_check.rc == 0)) else 'No' }}"
+          - "Kubeconfig exists: {{ 'Yes' if (kubeconfig_stat is defined and kubeconfig_stat.stat is defined and kubeconfig_stat.stat.exists) else 'No' }}"
+          - "K8s API connection: {{ 'OK' if (kubectl_result is defined and ('rc' in kubectl_result) and kubectl_result.rc == 0) else ( 'FAILED' if kubectl_result is defined else 'SKIPPED') }}"
+
+    - name: Set connection status success (SSH OK and optional K8s API OK)
+      set_fact:
+        connection_status: "success"
+      when:
+        - ping_result is defined
+        - ping_result.ping is defined
+        - ping_result.ping == 'pong'
+        - (
+            (kubectl_result is defined and ('rc' in kubectl_result) and kubectl_result.rc == 0)
+            or (kubectl_result is not defined)
+          )
+
+    - name: Set connection status (failed)
+      set_fact:
+        connection_status: "failed"
+      when: connection_status is not defined

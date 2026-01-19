@@ -1,0 +1,215 @@
+---
+# Execute kube-check remediation on K8s nodes
+- name: Run Kube-check Remediation on K8s Cluster
+  hosts: "{{ node_name | default('all') }}"
+  # Tối ưu: chỉ gather facts cần thiết
+  gather_facts: yes
+  gather_subset: 'min'  # Chỉ gather facts tối thiểu
+  # Tối ưu: chạy parallel trên nhiều node
+  strategy: free
+  vars:
+    kubecheck_path_remote: "{{ kubecheck_path | default('/home/' + ansible_user + '/Kube-check') }}"
+    reports_path_remote: "{{ reports_path | default('/home/' + ansible_user + '/Kube-check/reports') }}"
+    check_id: "{{ check_id }}"
+    auto_yes: false          # override via extra_vars if needed
+    auto_install: false      # override via extra_vars if needed
+    output_fmt: "json"
+
+  tasks:
+    - name: Validate check_id
+      fail:
+        msg: "check_id is required"
+      when: check_id is not defined or check_id == ""
+
+    - name: Normalize check_id (support list or string)
+      set_fact:
+        check_list: >-
+          {% if check_id is string %}{{ check_id.split(',') | map('trim') | list }}
+          {% elif check_id is sequence %}{{ check_id }}
+          {% else %}{{ [check_id] }}{% endif %}
+
+    - name: Check kube-check src exists
+      stat:
+        path: "{{ kubecheck_path_remote }}/src"
+      register: kubecheck_src_stat
+
+    - name: Check venv exists
+      stat:
+        path: "{{ kubecheck_path_remote }}/venv"
+      register: venv_stat
+
+    - name: Fail if kube-check src missing (run bootstrap first)
+      fail:
+        msg: "Kube-check src not found at {{ kubecheck_path_remote }}/src. Run kube-check-bootstrap.yml first."
+      when: not (kubecheck_src_stat.stat.exists | default(false))
+
+    - name: Fail if venv missing (run bootstrap first)
+      fail:
+        msg: "Kube-check venv not found at {{ kubecheck_path_remote }}/venv. Run kube-check-bootstrap.yml first."
+      when: not (venv_stat.stat.exists | default(false))
+
+    - name: Ensure reports directory
+      file:
+        path: "{{ reports_path_remote }}"
+        state: directory
+        mode: '0755'
+
+    # ==========================================================
+    # PRE-SCAN PHASE - Scan trước khi fix để so sánh
+    # ==========================================================
+    - name: Record pre-scan time
+      set_fact:
+        timing_pre_scan: "{{ lookup('pipe', 'date +%s') }}"
+
+    - name: Run pre-scan (before remediation)
+      command: >
+        {{ kubecheck_path_remote }}/venv/bin/python
+        {{ kubecheck_path_remote }}/src/main.py
+        run
+        --check {{ item }}
+        --output-format {{ output_fmt }}
+        --output-file {{ reports_path_remote }}/prescan_{{ item }}_{{ ansible_hostname }}_{{ ansible_date_time.epoch }}.json
+      register: prescan_result
+      failed_when: false
+      changed_when: false
+      environment:
+        PYTHONUNBUFFERED: "1"
+        PYTHONDONTWRITEBYTECODE: "1"
+      args:
+        chdir: "{{ kubecheck_path_remote }}"
+      loop: "{{ check_list }}"
+      loop_control:
+        loop_var: item
+
+    - name: Record post-pre-scan time
+      set_fact:
+        timing_post_prescan: "{{ lookup('pipe', 'date +%s') }}"
+
+    # ==========================================================
+    # REMEDIATION PHASE - Chỉ đo execution time
+    # ==========================================================
+    - name: Record pre-remediation time
+      set_fact:
+        timing_pre_remediate: "{{ lookup('pipe', 'date +%s') }}"
+
+    - name: Run kube-check remediation (per check)
+      command: >
+        {{ kubecheck_path_remote }}/venv/bin/python
+        {{ kubecheck_path_remote }}/src/main.py
+        remediate
+        --check {{ item }}
+        {{ '--yes' if auto_yes else '' }}
+        --output-format {{ output_fmt }}
+        --output-file {{ reports_path_remote }}/remediate_{{ item }}_{{ ansible_hostname }}_{{ ansible_date_time.epoch }}.json
+      register: remediation_result
+      changed_when: true
+      failed_when: false
+      environment:
+        PYTHONUNBUFFERED: "1"
+        PYTHONDONTWRITEBYTECODE: "1"
+      args:
+        chdir: "{{ kubecheck_path_remote }}"
+      loop: "{{ check_list }}"
+      loop_control:
+        loop_var: item
+
+    - name: Record post-remediation time
+      set_fact:
+        timing_post_remediate: "{{ lookup('pipe', 'date +%s') }}"
+
+    - name: Collect remediation/verify report paths
+      set_fact:
+        remediation_report_files: "{{ remediation_report_files | default([]) + [ reports_path_remote + '/remediate_' + item + '_' + ansible_hostname + '_' + ansible_date_time.epoch + '.json'] }}"
+      loop: "{{ check_list }}"
+      loop_control:
+        loop_var: item
+
+    - name: Display remediation results
+      debug:
+        msg: "{{ remediation_result.stdout_lines }}"
+      when: remediation_result.stdout_lines is defined
+
+    # ==========================================================
+    # VERIFICATION PHASE - Chỉ đo execution time
+    # ==========================================================
+    - name: Record pre-verification time
+      set_fact:
+        timing_pre_verify: "{{ lookup('pipe', 'date +%s') }}"
+
+    - name: Verify remediation (per check)
+      command: >
+        {{ kubecheck_path_remote }}/venv/bin/python
+        {{ kubecheck_path_remote }}/src/main.py
+        run
+        --check {{ item }}
+        --output-format {{ output_fmt }}
+        --output-file {{ reports_path_remote }}/verify_{{ item }}_{{ ansible_hostname }}_{{ ansible_date_time.epoch }}.json
+      register: verify_result
+      changed_when: false
+      failed_when: false
+      when: remediation_result is defined and (remediation_result.rc | default(-1)) == 0
+      environment:
+        PYTHONUNBUFFERED: "1"
+        PYTHONDONTWRITEBYTECODE: "1"
+      args:
+        chdir: "{{ kubecheck_path_remote }}"
+      loop: "{{ check_list }}"
+      loop_control:
+        loop_var: item
+
+    - name: Record post-verification time
+      set_fact:
+        timing_post_verify: "{{ lookup('pipe', 'date +%s') }}"
+
+    - name: Set remediation results fact
+      set_fact:
+        remediation_results: "{{ remediation_results | default([]) + [ {
+          'host': ansible_hostname,
+          'check_id': item,
+          'remediation_status': (
+            'success'
+            if (remediation_result is defined and (remediation_result.rc | default(-1)) == 0)
+            else 'failed'
+          ),
+          'verification_status': (
+            'pass'
+            if (verify_result is defined and (verify_result.rc | default(-1)) == 0 and ('PASS' in (verify_result.stdout | default(''))))
+            else ('skipped' if verify_result is not defined else 'fail')
+          ),
+          'output': remediation_result.stdout | default(''),
+          'verify_output': verify_result.stdout | default(''),
+          'error': remediation_result.stderr | default('')
+        } ] }}"
+      loop: "{{ check_list }}"
+      loop_control:
+        loop_var: item
+
+    # ==========================================================
+    # FETCH RESULT
+    # ==========================================================
+    - name: Fetch remediation reports
+      fetch:
+        src: "{{ item }}"
+        dest: "/tmp/kube-check-reports/"
+        flat: yes
+        validate_checksum: no
+      loop: "{{ remediation_report_files | default([]) }}"
+      ignore_errors: yes
+
+    # ==========================================================
+    # OUTPUT TIMING (pre-scan, remediation và verification time từ playbook)
+    # Connection và fetch time sẽ được tính ở Python backend
+    # ==========================================================
+    - name: Calculate remediation timing
+      set_fact:
+        timing_prescan: "{{ (timing_post_prescan | int) - (timing_pre_scan | int) if timing_pre_scan is defined and timing_post_prescan is defined else 0 }}"
+        timing_remediation: "{{ (timing_post_remediate | int) - (timing_pre_remediate | int) }}"
+        timing_verification: "{{ (timing_post_verify | int) - (timing_pre_verify | int) if timing_pre_verify is defined and timing_post_verify is defined else 0 }}"
+
+    - name: Output remediation timing JSON (for parser)
+      debug:
+        msg: "REMEDIATION_TIMING_JSON_START{{ {
+          'prescan_seconds': timing_prescan,
+          'remediation_seconds': timing_remediation,
+          'verification_seconds': timing_verification
+        } | to_json }}REMEDIATION_TIMING_JSON_END"

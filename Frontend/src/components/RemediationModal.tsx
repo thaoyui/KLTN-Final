@@ -1,11 +1,44 @@
 import React from 'react';
 import { Loader2, AlertTriangle, CheckCircle2, XCircle } from 'lucide-react';
 
+type CheckDetail = {
+    checkId: string;
+    remediation?: string;
+};
+
+const kubeVarMap: Record<string, string> = {
+    '$apiserverconf': '/etc/kubernetes/manifests/kube-apiserver.yaml',
+    '$apiserverbin': 'kube-apiserver',
+    '$controllermanagerbin': 'kube-controller-manager',
+    '$controllermanagerconf': '/etc/kubernetes/manifests/kube-controller-manager.yaml',
+    '$schedulerbin': 'kube-scheduler',
+    '$schedulerconf': '/etc/kubernetes/manifests/kube-scheduler.yaml',
+    '$schedulerkubeconfig': '/etc/kubernetes/scheduler.conf',
+    '$controllermanagerkubeconfig': '/etc/kubernetes/controller-manager.conf',
+    '$etcddatadir': '/var/lib/etcd',
+    '$etcdconf': '/etc/kubernetes/manifests/etcd.yaml',
+    '$etcdbin': 'etcd',
+    '$kubeletbin': 'kubelet',
+    '$kubeletsvc': '/usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf',
+    '$kubeletkubeconfig': '/etc/kubernetes/kubelet.conf',
+    '$kubeletconf': '/var/lib/kubelet/config.yaml',
+    '$kubeletcafile': '/etc/kubernetes/pki/ca.crt',
+    '$proxybin': 'kube-proxy',
+    '$proxykubeconfig': '/var/lib/kube-proxy/kubeconfig.conf',
+    '$proxyconf': '/var/lib/kube-proxy/config.conf',
+};
+
+const applyKubeSubstitutions = (text?: string) => {
+    if (!text) return text;
+    return Object.entries(kubeVarMap).reduce((acc, [key, value]) => acc.split(key).join(value), text);
+};
+
 interface RemediationModalProps {
     isOpen: boolean;
     onClose: () => void;
     onConfirm: () => void;
     checkIds: string[];
+    checkDetails?: CheckDetail[];
     isLoading: boolean;
     results: any[] | null;
 }
@@ -17,8 +50,14 @@ export const RemediationModal: React.FC<RemediationModalProps> = ({
     checkIds,
     isLoading,
     results,
+    checkDetails = [],
 }) => {
     if (!isOpen) return null;
+
+    const detailsMap = checkDetails.reduce<Record<string, string | undefined>>((acc, cur) => {
+        acc[cur.checkId] = applyKubeSubstitutions(cur.remediation);
+        return acc;
+    }, {});
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black bg-opacity-50">
@@ -49,12 +88,20 @@ export const RemediationModal: React.FC<RemediationModalProps> = ({
                             <p className="mb-4 text-gray-700 font-medium">
                                 The following checks will be remediated:
                             </p>
-                            <div className="bg-gray-100 rounded-md p-4 max-h-60 overflow-y-auto font-mono text-sm">
-                                <ul className="list-disc list-inside space-y-1">
-                                    {checkIds.map(id => (
-                                        <li key={id} className="text-gray-800">{id}</li>
-                                    ))}
-                                </ul>
+                            <div className="bg-gray-100 rounded-md p-4 max-h-80 overflow-y-auto space-y-3">
+                                {checkIds.map(id => (
+                                    <div key={id} className="bg-white rounded border border-gray-200 p-3 shadow-sm">
+                                        <p className="text-sm font-semibold text-gray-900">{id}</p>
+                                        {detailsMap[id] && (
+                                            <div className="mt-2 bg-red-50 border border-red-100 rounded p-2">
+                                                <p className="text-xs font-semibold text-red-800 mb-1">Remediation command(s)</p>
+                                                <pre className="text-xs text-red-800 whitespace-pre-wrap font-mono">
+                                                    {detailsMap[id]}
+                                                </pre>
+                                            </div>
+                                        )}
+                                    </div>
+                                ))}
                             </div>
 
                             <div className="mt-6 flex justify-end space-x-3">

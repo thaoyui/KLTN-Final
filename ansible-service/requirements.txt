@@ -1,0 +1,9 @@
+flask==2.3.3
+flask-cors==4.0.0
+requests==2.31.0
+pyyaml==6.0.1
+ansible==7.7.0
+ansible-core==2.14.5
+kubernetes==27.2.0
+python-dotenv==1.0.0
+

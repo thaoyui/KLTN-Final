@@ -1,0 +1,68 @@
+- name: Check Kube-check Bootstrap Status (Precise Timing)
+  hosts: "{{ node_name | default('all') }}"
+  gather_facts: false
+  strategy: linear
+  become: false
+
+  vars:
+    kubecheck_path_remote: "{{ kubecheck_path | default('/home/' + ansible_user + '/Kube-check') }}"
+
+  tasks:
+    - name: Record bootstrap check start time
+      set_fact:
+        bootstrap_timing_start: "{{ lookup('pipe', 'date +%s') }}"
+      failed_when: false
+
+
+
+    - name: Check kube-check src exists
+      stat:
+        path: "{{ kubecheck_path_remote }}/src"
+      register: kubecheck_src_stat
+      ignore_errors: yes
+      failed_when: false
+
+    - name: Check venv exists
+      stat:
+        path: "{{ kubecheck_path_remote }}/venv"
+      register: venv_stat
+      ignore_errors: yes
+      failed_when: false
+
+    - name: Check venv python exists
+      stat:
+        path: "{{ kubecheck_path_remote }}/venv/bin/python"
+      register: venv_python_stat
+      ignore_errors: yes
+      failed_when: false
+
+    - name: Record bootstrap check end time
+      set_fact:
+        bootstrap_timing_end: "{{ lookup('pipe', 'date +%s') }}"
+      failed_when: false
+
+    - name: Determine bootstrap status
+      set_fact:
+        bootstrap_status: >-
+          {% if kubecheck_src_stat is defined and kubecheck_src_stat.stat is defined and kubecheck_src_stat.stat.exists
+                and venv_stat is defined and venv_stat.stat is defined and venv_stat.stat.exists
+                and venv_python_stat is defined and venv_python_stat.stat is defined and venv_python_stat.stat.exists %}
+          ready
+          {% elif kubecheck_src_stat is defined and kubecheck_src_stat.stat is defined and kubecheck_src_stat.stat.exists %}
+          venv_missing
+          {% else %}
+          not_bootstrapped
+          {% endif %}
+      failed_when: false
+
+    - name: Output bootstrap timing JSON
+      debug:
+        msg: >-
+          BOOTSTRAP_TIMING_JSON_START
+          {{ {
+            'host': inventory_hostname,
+            'bootstrap_status': bootstrap_status | default('unknown'),
+            'bootstrap_check_seconds': ((bootstrap_timing_end | default(0) | int) - (bootstrap_timing_start | default(0) | int))
+          } | to_json }}
+          BOOTSTRAP_TIMING_JSON_END
+      failed_when: false

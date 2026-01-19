@@ -1,0 +1,36 @@
+# Example Ansible inventory for K8s cluster
+# Copy this file to hosts.yml and update with your cluster information
+
+all:
+  children:
+    k8s_masters:
+      hosts:
+        master1:
+          ansible_host: 192.168.1.10
+          ansible_user: root
+          ansible_ssh_private_key_file: /app/ansible/ssh_keys/id_rsa
+          node_role: master
+        master2:
+          ansible_host: 192.168.1.11
+          ansible_user: root
+          ansible_ssh_private_key_file: /app/ansible/ssh_keys/id_rsa
+          node_role: master
+    
+    k8s_workers:
+      hosts:
+        worker1:
+          ansible_host: 192.168.1.20
+          ansible_user: root
+          ansible_ssh_private_key_file: /app/ansible/ssh_keys/id_rsa
+          node_role: worker
+        worker2:
+          ansible_host: 192.168.1.21
+          ansible_user: root
+          ansible_ssh_private_key_file: /app/ansible/ssh_keys/id_rsa
+          node_role: worker
+  
+  vars:
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+    ansible_python_interpreter: /usr/bin/python3
+    kubeconfig_path: /root/.kube/config
+

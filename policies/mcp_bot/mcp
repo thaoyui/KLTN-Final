@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# MCP Bot Wrapper: Calls Python CLI
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
+
+# Run as module to avoid import issues
+python3 -m mcp_bot.cli "$@"
+

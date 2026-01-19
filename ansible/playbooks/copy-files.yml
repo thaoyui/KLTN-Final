@@ -1,0 +1,36 @@
+---
+# Copy files from K8s nodes to local
+- name: Copy Files from K8s Nodes
+  hosts: "{{ node_name | default('all') }}"
+  gather_facts: yes
+  vars:
+    remote_paths: "{{ remote_paths | default([]) }}"
+    local_path: "{{ local_path | default('/tmp/k8s-files') }}"
+  
+  tasks:
+    - name: Create local directory
+      file:
+        path: "{{ local_path }}/{{ ansible_hostname }}"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+    
+    - name: Copy files from remote nodes
+      fetch:
+        src: "{{ item }}"
+        dest: "{{ local_path }}/{{ ansible_hostname }}/{{ item | basename }}"
+        flat: yes
+      register: fetch_result
+      loop: "{{ remote_paths }}"
+      ignore_errors: yes
+      when: remote_paths | length > 0
+    
+    - name: List copied files
+      set_fact:
+        copied_files: "{{ fetch_result.results | selectattr('dest', 'defined') | map(attribute='dest') | list }}"
+      when: fetch_result is defined
+    
+    - name: Display copied files
+      debug:
+        msg: "Copied {{ copied_files | length }} files from {{ ansible_hostname }}"
+

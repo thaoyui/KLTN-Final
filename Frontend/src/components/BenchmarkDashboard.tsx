@@ -1,20 +1,21 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { benchmarkData, BenchmarkSection } from '../data/benchmarkData';
 import { BenchmarkSectionCard } from './BenchmarkSectionCard';
-import { Search, Filter, CheckCircle2, AlertCircle, Loader2, FileText, FileDown, ChevronDown, Wrench, Play } from 'lucide-react';
+import { Search, Filter, CheckCircle2, AlertCircle, Loader2, FileText, FileDown, ChevronDown, Wrench, Play, RefreshCw } from 'lucide-react';
 import { benchmarkAPI } from '../services/benchmarkAPI';
 import { RemediationModal } from './RemediationModal';
 import { ScanResultsModal } from './ScanResultsModal';
+import { k8sAPI, InventoryNode } from '../services/k8sAPI';
 export const BenchmarkDashboard: React.FC = () => {
   const [sections, setSections] = useState<BenchmarkSection[]>(benchmarkData);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterType, setFilterType] = useState<'all' | 'manual' | 'automated'>('all');
-  const [isGeneratingReport, setIsGeneratingReport] = useState(false);
+  const [isExportingResults, setIsExportingResults] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [scanProgress, setScanProgress] = useState(0);
   const [submitMessage, setSubmitMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
   const [showFormatDropdown, setShowFormatDropdown] = useState(false);
-  const [selectedFormat, setSelectedFormat] = useState<'html' | 'pdf'>('html');
+  const [selectedFormat, setSelectedFormat] = useState<'html' | 'json' | 'pdf'>('html');
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   // Remediation State
@@ -24,6 +25,10 @@ export const BenchmarkDashboard: React.FC = () => {
   const [remediationResults, setRemediationResults] = useState<any[] | null>(null);
   const [isScanResultsModalOpen, setIsScanResultsModalOpen] = useState(false);
   const [lastScanResults, setLastScanResults] = useState<any[]>([]);
+  const [inventoryNodes, setInventoryNodes] = useState<InventoryNode[]>([]);
+  const [selectedNodeName, setSelectedNodeName] = useState<string | undefined>(undefined);
+  const [isLoadingNodes, setIsLoadingNodes] = useState(false);
+  const clusterName = 'default';
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -39,29 +44,107 @@ export const BenchmarkDashboard: React.FC = () => {
     };
   }, []);
 
+  const loadNodes = async (forceRefresh = false) => {
+    try {
+      setIsLoadingNodes(true);
+      // Load from API endpoint which checks actual bootstrap status on nodes
+      // Backend runs playbook to verify: /app/Kube-check/src, /app/Kube-check/venv exist
+      // Uses cache (5min TTL) but always checks real status on nodes, not just inventory file
+      const res = await k8sAPI.getInventory(clusterName, forceRefresh);
+      const nodes = (res.nodes || []) as InventoryNode[];
+      setInventoryNodes(nodes);
+      // Preserve user selection; only set default when nothing selected yet
+      if (!selectedNodeName) {
+        const stored = localStorage.getItem('selectedNodeName') || undefined;
+        const stillExists = stored && nodes.find(n => n.name === stored);
+        if (stillExists) {
+          setSelectedNodeName(stored);
+        } else {
+          const ready = nodes.find(n => n.status === 'ready');
+          const fallback = ready || nodes[0];
+          setSelectedNodeName(fallback?.name);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load nodes', err);
+    } finally {
+      setIsLoadingNodes(false);
+    }
+  };
+
+  const refreshNodes = () => {
+    loadNodes(true);
+  };
+
+  useEffect(() => {
+    // Load nodes on mount or when clusterName changes
+    // Use cache first (don't force refresh) to avoid slow playbook execution on every mount
+    // Cache TTL is 5 minutes, which is sufficient for most cases
+    loadNodes(false);
+
+    // Listen for inventory updates (emitted after bootstrap) to refresh dropdown without full page reload
+    // Only force refresh when explicitly notified (e.g., after bootstrap completes)
+    const handleInventoryUpdated = () => loadNodes(true);
+    window.addEventListener('inventory-updated', handleInventoryUpdated);
+
+    return () => {
+      window.removeEventListener('inventory-updated', handleInventoryUpdated);
+    };
+  }, [clusterName]);
+
+  // Get selected node role
+  const selectedNodeRole = useMemo(() => {
+    if (!selectedNodeName) return null;
+    const node = inventoryNodes.find(n => n.name === selectedNodeName);
+    return node?.role?.toLowerCase() || null;
+  }, [selectedNodeName, inventoryNodes]);
+
+  // Determine which sections to show based on node role
+  const getSectionsForRole = (role: string | null): string[] => {
+    if (!role) return ['section1', 'section2', 'section3', 'section4', 'section5']; // Show all if no role
+
+    if (role === 'master') {
+      // Master nodes: Section 1 (Control Plane), 2 (etcd), 3 (Control Plane Config), 5 (Policies)
+      // Policies can only be applied from master node or machine with kubeconfig
+      return ['section1', 'section2', 'section3', 'section5'];
+    } else if (role === 'worker') {
+      // Worker nodes: Only Section 4 (Worker Nodes)
+      // Policies (Section 5) cannot be applied from worker nodes (no kubectl access)
+      return ['section4'];
+    }
+
+    // Default: show all
+    return ['section1', 'section2', 'section3', 'section4', 'section5'];
+  };
+
   const filteredSections = useMemo(() => {
-    return sections.map(section => ({
-      ...section,
-      items: section.items.filter(item => {
-        const matchesSearch = item.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
-          item.description.toLowerCase().includes(searchTerm.toLowerCase()) ||
-          item.id.toLowerCase().includes(searchTerm.toLowerCase());
+    const allowedSectionIds = getSectionsForRole(selectedNodeRole);
 
-        const matchesFilter = filterType === 'all' ||
-          (filterType === 'manual' && item.type === 'Manual') ||
-          (filterType === 'automated' && item.type === 'Automated');
+    return sections
+      .filter(section => allowedSectionIds.includes(section.id))
+      .map(section => ({
+        ...section,
+        items: section.items.filter(item => {
+          const matchesSearch = item.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
+            item.description.toLowerCase().includes(searchTerm.toLowerCase()) ||
+            item.id.toLowerCase().includes(searchTerm.toLowerCase());
 
-        return matchesSearch && matchesFilter;
-      })
-    })).filter(section => section.items.length > 0);
-  }, [sections, searchTerm, filterType]);
+          const matchesFilter = filterType === 'all' ||
+            (filterType === 'manual' && item.type === 'Manual') ||
+            (filterType === 'automated' && item.type === 'Automated');
 
-  const totalItems = sections.reduce((acc, section) => acc + section.items.length, 0);
-  const selectedItems = sections.reduce((acc, section) =>
+          return matchesSearch && matchesFilter;
+        })
+      })).filter(section => section.items.length > 0);
+  }, [sections, searchTerm, filterType, selectedNodeRole]);
+
+  // Calculate totals based on filtered sections (respecting role filter)
+  const totalItems = filteredSections.reduce((acc, section) => acc + section.items.length, 0);
+  const selectedItems = filteredSections.reduce((acc, section) =>
     acc + section.items.filter(item => item.selected).length, 0);
 
-  // Get failed items that are selected
-  const selectedFailedItems = sections.flatMap(section =>
+  // Get failed items that are selected (from filtered sections)
+  const selectedFailedItems = filteredSections.flatMap(section =>
     section.items.filter(item => item.selected && item.status === 'FAIL')
   );
 
@@ -93,11 +176,20 @@ export const BenchmarkDashboard: React.FC = () => {
 
   const handleSelectAll = () => {
     const allSelected = selectedItems === totalItems;
+    const allowedSectionIds = getSectionsForRole(selectedNodeRole);
+
     setSections(prevSections =>
-      prevSections.map(section => ({
-        ...section,
-        items: section.items.map(item => ({ ...item, selected: !allSelected }))
-      }))
+      prevSections.map(section => {
+        // Only modify sections that are visible (filtered by role)
+        if (allowedSectionIds.includes(section.id)) {
+          return {
+            ...section,
+            items: section.items.map(item => ({ ...item, selected: !allSelected }))
+          };
+        }
+        // Keep other sections unchanged
+        return section;
+      })
     );
   };
 
@@ -120,7 +212,10 @@ export const BenchmarkDashboard: React.FC = () => {
   const confirmRemediation = async () => {
     setIsRemediating(true);
     try {
-      const response = await benchmarkAPI.remediateCheck(remediationCheckIds);
+      const response = await benchmarkAPI.remediateCheck(remediationCheckIds, {
+        clusterName,
+        nodeName: selectedNodeName
+      });
 
       if (response.success) {
         setRemediationResults(response.results);
@@ -128,14 +223,13 @@ export const BenchmarkDashboard: React.FC = () => {
         // Update local state based on VERIFICATION results
         const passedIds = response.results
           .filter((r: any) =>
-            // Mark as PASS if verified PASS, OR if action was just remediate and it was successful (legacy/fallback)
-            (r.action === 'verify' && r.status === 'PASS') ||
-            (!r.action && r.success)
+            // Mark as PASS if verification says PASS, or any remediation action returns success/PASS
+            r.status === 'PASS' || r.success === true
           )
           .map((r: any) => r.checkId);
 
         const failedIds = response.results
-          .filter((r: any) => r.action === 'verify' && r.status !== 'PASS')
+          .filter((r: any) => r.status && r.status !== 'PASS')
           .map((r: any) => r.checkId);
 
         if (passedIds.length > 0 || failedIds.length > 0) {
@@ -155,6 +249,19 @@ export const BenchmarkDashboard: React.FC = () => {
             }))
           );
         }
+
+        // Dispatch event to notify dashboard to refresh
+        // This allows DashboardPage to automatically update after remediation
+        window.dispatchEvent(new CustomEvent('remediation-complete', {
+          detail: {
+            checkIds: remediationCheckIds,
+            results: response.results,
+            passedIds,
+            failedIds,
+            nodeName: selectedNodeName,
+            clusterName: clusterName
+          }
+        }));
       } else {
         setSubmitMessage({ type: 'error', text: 'Remediation failed to start' });
         setIsRemediationModalOpen(false);
@@ -210,7 +317,12 @@ export const BenchmarkDashboard: React.FC = () => {
 
     try {
       // 1. Submit and Start Scan
-      const { scanId } = await benchmarkAPI.submitAndScan(selectedControls);
+      const { scanId } = await benchmarkAPI.submitAndScan(
+        selectedControls,
+        {},
+        {},
+        { clusterName, nodeName: selectedNodeName }
+      );
 
       // 2. Poll for results
       await benchmarkAPI.pollScanStatus(scanId, (progress, results) => {
@@ -247,6 +359,16 @@ export const BenchmarkDashboard: React.FC = () => {
           text: `Scan completed! Found ${failedCount} failed checks.`
         });
 
+        // Dispatch event to notify dashboard to refresh
+        // This allows DashboardPage to automatically update after scan
+        window.dispatchEvent(new CustomEvent('scan-complete', {
+          detail: {
+            scanId,
+            results: scanResults,
+            failedCount
+          }
+        }));
+
         // Open results modal
         setLastScanResults(scanResults);
         setIsScanResultsModalOpen(true);
@@ -266,48 +388,48 @@ export const BenchmarkDashboard: React.FC = () => {
     }
   };
 
-  const handleGenerateReport = async (format: 'html' | 'pdf' = selectedFormat) => {
-    const selectedControls = sections.flatMap(section =>
-      section.items.filter(item => item.selected)
-    );
-
-    if (selectedControls.length === 0) {
-      setSubmitMessage({ type: 'error', text: 'Please select at least one benchmark item to generate report' });
+  const handleExportScanResults = async (format: 'html' | 'json' | 'pdf' = selectedFormat) => {
+    // Check if there are scan results to export
+    if (!lastScanResults || lastScanResults.length === 0) {
+      setSubmitMessage({
+        type: 'error',
+        text: 'No scan results available. Please run a scan first to export results.'
+      });
       return;
     }
 
-    setIsGeneratingReport(true);
+    setIsExportingResults(true);
     setSubmitMessage(null);
     setShowFormatDropdown(false);
 
     try {
-      console.log(`📊 Generating ${format.toUpperCase()} report for:`, selectedControls.map(item => item.id));
-
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const filename = `kube-check-report-${timestamp}.${format}`;
+      const nodeInfo = selectedNodeName ? `-${selectedNodeName}` : '';
+      const filename = `scan-results${nodeInfo}-${timestamp}.${format}`;
 
       setSubmitMessage({
         type: 'success',
-        text: `Generating ${format.toUpperCase()} report with ${selectedControls.length} checks... Please wait.`
+        text: `Exporting scan results as ${format.toUpperCase()}... Please wait.`
       });
 
-      const response = await benchmarkAPI.generateAndDownloadReport(selectedControls, format, filename);
+      // Export scan results
+      const response = await benchmarkAPI.exportScanResults(lastScanResults, format, filename);
 
-      console.log('✅ Report generated and downloaded:', response);
+      console.log('✅ Scan results exported:', response);
 
       setSubmitMessage({
         type: 'success',
-        text: `${format.toUpperCase()} report generated and downloaded successfully! Checks: ${selectedControls.length}`
+        text: `Scan results exported successfully as ${format.toUpperCase()}! (${lastScanResults.length} checks)`
       });
 
     } catch (error) {
-      console.error('❌ Failed to generate report:', error);
+      console.error('❌ Failed to export scan results:', error);
       setSubmitMessage({
         type: 'error',
-        text: 'Failed to generate report: ' + (error instanceof Error ? error.message : String(error))
+        text: 'Failed to export scan results: ' + (error instanceof Error ? error.message : String(error))
       });
     } finally {
-      setIsGeneratingReport(false);
+      setIsExportingResults(false);
     }
   };
 
@@ -315,110 +437,162 @@ export const BenchmarkDashboard: React.FC = () => {
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
       <div className="bg-white border-b border-gray-200">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="py-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <h1 className="text-3xl font-bold text-gray-900">
-                  Kubernetes CIS Benchmark
-                </h1>
-                <p className="mt-2 text-gray-600">
-                  Select and manage Kubernetes security compliance checks
-                </p>
-              </div>
-
-              <div className="flex items-center space-x-4">
-                <div className="flex items-center space-x-2 text-sm">
-                  <CheckCircle2 className="h-5 w-5 text-green-600" />
-                  <span className="font-medium text-gray-900">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+          <div className="flex flex-col gap-6">
+            <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
+              <div className="space-y-3">
+                <div className="inline-flex items-center px-3 py-1 text-xs font-semibold rounded-full bg-blue-200 text-blue-800 border border-blue-300 w-fit">
+                  Kubernetes Security
+                </div>
+                <div className="flex items-center gap-3 flex-wrap">
+                  <h1 className="text-3xl font-semibold tracking-tight text-gray-900">Kubernetes CIS Benchmark</h1>
+                  <span className="px-3 py-1 rounded-full bg-gray-100 text-sm text-gray-700 border border-gray-200">
                     {selectedItems} of {totalItems} selected
                   </span>
                 </div>
+                <p className="text-gray-600 max-w-2xl">
+                  Select and manage Kubernetes security compliance checks for your cluster. Run scans, remediate issues, and export professional reports.
+                </p>
+              </div>
 
-                <button
-                  onClick={handleSelectAll}
-                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors duration-200"
-                >
-                  {selectedItems === totalItems ? 'Deselect All' : 'Select All'}
-                </button>
-
-                {/* Run Scan Button */}
-                <button
-                  onClick={handleRunScan}
-                  disabled={selectedItems === 0 || isScanning}
-                  className="flex items-center space-x-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors duration-200"
-                >
-                  {isScanning ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Play className="h-4 w-4" />
-                  )}
-                  <span>
-                    {isScanning ? `Scanning ${scanProgress}%...` : 'Run Scan'}
-                  </span>
-                </button>
-
-                {/* Fix Selected Button */}
-                <button
-                  onClick={handleRemediateSelected}
-                  disabled={selectedFailedItems.length === 0}
-                  className="flex items-center space-x-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors duration-200"
-                >
-                  <Wrench className="h-4 w-4" />
-                  <span>
-                    Fix Selected ({selectedFailedItems.length})
-                  </span>
-                </button>
-
-                {/* Export Selection button đã được xóa */}
-
-                {/* Generate Report Dropdown Button */}
-                <div className="relative" ref={dropdownRef}>
-                  <button
-                    onClick={() => setShowFormatDropdown(!showFormatDropdown)}
-                    disabled={selectedItems === 0 || isGeneratingReport}
-                    className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors duration-200"
-                  >
-                    {isGeneratingReport ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <FileDown className="h-4 w-4" />
-                    )}
-                    <span>
-                      {isGeneratingReport
-                        ? `Generating ${selectedFormat.toUpperCase()}...`
-                        : `Generate Report (${selectedFormat.toUpperCase()})`
-                      }
-                    </span>
-                    <ChevronDown className="h-4 w-4" />
-                  </button>
-
-                  {/* Dropdown Menu */}
-                  {showFormatDropdown && !isGeneratingReport && (
-                    <div className="absolute top-full left-0 mt-1 w-48 bg-white border border-gray-200 rounded-lg shadow-lg z-10">
-                      <button
-                        onClick={() => {
-                          setSelectedFormat('html');
-                          handleGenerateReport('html');
-                        }}
-                        className="flex items-center space-x-2 w-full px-4 py-2 text-left hover:bg-gray-50 first:rounded-t-lg"
-                      >
-                        <FileText className="h-4 w-4 text-orange-500" />
-                        <span className="text-gray-700">HTML Report</span>
-                      </button>
-                      <button
-                        onClick={() => {
-                          setSelectedFormat('pdf');
-                          handleGenerateReport('pdf');
-                        }}
-                        className="flex items-center space-x-2 w-full px-4 py-2 text-left hover:bg-gray-50 border-t border-gray-100 last:rounded-b-lg"
-                      >
-                        <FileDown className="h-4 w-4 text-red-500" />
-                        <span className="text-gray-700">PDF Report</span>
-                      </button>
-                    </div>
-                  )}
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 w-full lg:w-auto min-w-0">
+                <div className="rounded-2xl bg-gray-100 border border-gray-300 px-4 py-3 shadow-sm min-w-0">
+                  <p className="text-xs uppercase tracking-wide text-gray-600">Selected</p>
+                  <p className="text-lg font-semibold text-gray-900">{selectedItems}</p>
                 </div>
+                <div className="rounded-2xl bg-red-100 border border-red-300 px-4 py-3 shadow-sm min-w-0">
+                  <p className="text-xs uppercase tracking-wide text-red-800">Failed</p>
+                  <p className="text-lg font-semibold text-red-800">{selectedFailedItems.length}</p>
+                </div>
+                <div className="rounded-2xl bg-sky-100 border border-sky-300 px-4 py-3 shadow-sm min-w-0">
+                  <div className="flex items-center justify-between mb-1">
+                    <p className="text-xs uppercase tracking-wide text-sky-800">Node</p>
+                    <button
+                      onClick={refreshNodes}
+                      disabled={isLoadingNodes}
+                      className="p-1 hover:bg-sky-200 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                      title="Refresh node status"
+                    >
+                      <RefreshCw className={`h-3 w-3 text-sky-700 ${isLoadingNodes ? 'animate-spin' : ''}`} />
+                    </button>
+                  </div>
+                  <select
+                    value={selectedNodeName || ''}
+                    onChange={(e) => {
+                      const next = e.target.value || undefined;
+                      setSelectedNodeName(next);
+                      if (next) {
+                        localStorage.setItem('selectedNodeName', next);
+                      } else {
+                        localStorage.removeItem('selectedNodeName');
+                      }
+                    }}
+                    disabled={isLoadingNodes || inventoryNodes.length === 0}
+                    className="w-full mt-1 bg-white border border-sky-200 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-sky-500 py-2 px-2 truncate"
+                    title={selectedNodeName ? inventoryNodes.find(n => n.name === selectedNodeName)?.name : ''}
+                  >
+                    {isLoadingNodes && <option>Loading...</option>}
+                    {!isLoadingNodes && inventoryNodes.length === 0 && <option value="">No nodes</option>}
+                    {!isLoadingNodes && inventoryNodes.map((n) => {
+                      // Show status for non-ready nodes
+                      const statusDisplay = n.status && n.status !== 'ready' ? ` (${n.status})` : '';
+                      // Only disable nodes that are not ready (unreachable/not_bootstrapped can be selected for bootstrap, but not for scan)
+                      // For scan, only ready nodes can be used
+                      const disabled = !!(n.status && n.status !== 'ready');
+                      return (
+                        <option
+                          key={n.name}
+                          value={n.name}
+                          disabled={disabled}
+                          title={`${n.name}${statusDisplay}${disabled ? ' - Bootstrap required before scan' : ''}`}
+                        >
+                          {n.name}{statusDisplay}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              <button
+                onClick={handleRunScan}
+                disabled={selectedItems === 0 || isScanning || (!selectedNodeName && inventoryNodes.length > 0)}
+                className="w-full flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-blue-700 text-white font-semibold shadow-md shadow-blue-200/70 hover:bg-blue-800 transition-colors disabled:opacity-60 disabled:cursor-not-allowed min-w-0"
+              >
+                {isScanning ? <Loader2 className="h-4 w-4 animate-spin flex-shrink-0" /> : <Play className="h-4 w-4 flex-shrink-0" />}
+                <span className="truncate">{isScanning ? `Scanning ${scanProgress}%...` : 'Run Scan'}</span>
+              </button>
+
+              <button
+                onClick={handleRemediateSelected}
+                disabled={selectedFailedItems.length === 0}
+                className="w-full flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-red-600 text-white font-semibold shadow-md shadow-red-200/70 hover:bg-red-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed min-w-0"
+              >
+                <Wrench className="h-4 w-4 flex-shrink-0" />
+                <span className="truncate">Fix Selected ({selectedFailedItems.length})</span>
+              </button>
+
+              <button
+                onClick={handleSelectAll}
+                className="w-full flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-blue-600 text-white font-semibold shadow-md shadow-blue-200/70 hover:bg-blue-700 transition-colors min-w-0"
+              >
+                <CheckCircle2 className="h-4 w-4 flex-shrink-0" />
+                <span className="truncate">{selectedItems === totalItems ? 'Deselect All' : 'Select All'}</span>
+              </button>
+
+              <div className="relative w-full min-w-0" ref={dropdownRef}>
+                <button
+                  onClick={() => setShowFormatDropdown(!showFormatDropdown)}
+                  disabled={!lastScanResults || lastScanResults.length === 0 || isExportingResults}
+                  className="w-full flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-teal-600 text-white font-semibold shadow-md shadow-teal-200/70 hover:bg-teal-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed min-w-0"
+                  title={!lastScanResults || lastScanResults.length === 0 ? 'Run a scan first to export results' : 'Export scan results'}
+                >
+                  {isExportingResults ? <Loader2 className="h-4 w-4 animate-spin flex-shrink-0" /> : <FileDown className="h-4 w-4 flex-shrink-0" />}
+                  <span className="truncate">
+                    {isExportingResults
+                      ? `Exporting ${selectedFormat.toUpperCase()}...`
+                      : `Export Scan Results (${selectedFormat.toUpperCase()})`
+                    }
+                  </span>
+                  <ChevronDown className="h-4 w-4 flex-shrink-0" />
+                </button>
+
+                {showFormatDropdown && !isExportingResults && (
+                  <div className="absolute top-full left-0 mt-2 w-48 bg-white border border-gray-200 rounded-xl shadow-2xl z-10 overflow-hidden">
+                    <button
+                      onClick={() => {
+                        setSelectedFormat('html');
+                        handleExportScanResults('html');
+                      }}
+                      className="flex items-center gap-2 w-full px-4 py-3 text-left hover:bg-gray-50"
+                    >
+                      <FileText className="h-4 w-4 text-orange-500" />
+                      <span className="text-gray-800">Export as HTML</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        setSelectedFormat('pdf');
+                        handleExportScanResults('pdf');
+                      }}
+                      className="flex items-center gap-2 w-full px-4 py-3 text-left hover:bg-gray-50 border-t border-gray-100"
+                    >
+                      <FileText className="h-4 w-4 text-red-500" />
+                      <span className="text-gray-800">Export as PDF</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        setSelectedFormat('json');
+                        handleExportScanResults('json');
+                      }}
+                      className="flex items-center gap-2 w-full px-4 py-3 text-left hover:bg-gray-50 border-t border-gray-100"
+                    >
+                      <FileDown className="h-4 w-4 text-blue-500" />
+                      <span className="text-gray-800">Export as JSON</span>
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -450,8 +624,8 @@ export const BenchmarkDashboard: React.FC = () => {
           </div>
         )}
 
-        <div className="bg-white rounded-lg border border-gray-200 p-6 mb-6">
-          <div className="flex flex-col sm:flex-row gap-4">
+        <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-6 shadow-sm">
+          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
             {/* Search */}
             <div className="flex-1">
               <div className="relative">
@@ -461,19 +635,19 @@ export const BenchmarkDashboard: React.FC = () => {
                   placeholder="Search controls by ID, title, or description..."
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
-                  className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  className="w-full pl-10 pr-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent bg-gray-50"
                 />
               </div>
             </div>
 
             {/* Filter */}
-            <div className="sm:w-48">
+            <div className="w-full lg:w-64">
               <div className="relative">
                 <Filter className="absolute left-3 top-3 h-4 w-4 text-gray-400" />
                 <select
                   value={filterType}
                   onChange={(e) => setFilterType(e.target.value as 'all' | 'manual' | 'automated')}
-                  className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent appearance-none bg-white"
+                  className="w-full pl-10 pr-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent appearance-none bg-white"
                 >
                   <option value="all">All Types</option>
                   <option value="automated">Automated</option>
@@ -484,26 +658,35 @@ export const BenchmarkDashboard: React.FC = () => {
           </div>
 
           {/* Stats */}
-          <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <div className="flex items-center space-x-2">
-              <div className="w-3 h-3 bg-blue-600 rounded-full"></div>
-              <span className="text-sm text-gray-600">
-                Total: {filteredSections.reduce((acc, section) => acc + section.items.length, 0)} controls
-              </span>
+          <div className="mt-6 grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="flex items-center gap-3 rounded-xl border border-gray-300 bg-gray-100 px-4 py-3">
+              <div className="w-10 h-10 rounded-full bg-gray-200 text-gray-900 flex items-center justify-center font-semibold">
+                {filteredSections.reduce((acc, section) => acc + section.items.length, 0)}
+              </div>
+              <div>
+                <p className="text-xs text-gray-700">Total controls</p>
+                <p className="text-sm font-semibold text-gray-900">Coverage overview</p>
+              </div>
             </div>
-            <div className="flex items-center space-x-2">
-              <div className="w-3 h-3 bg-green-600 rounded-full"></div>
-              <span className="text-sm text-gray-600">
-                Automated: {filteredSections.reduce((acc, section) =>
-                  acc + section.items.filter(item => item.type === 'Automated').length, 0)} controls
-              </span>
+            <div className="flex items-center gap-3 rounded-xl border border-teal-300 bg-teal-100 px-4 py-3">
+              <div className="w-10 h-10 rounded-full bg-teal-200 text-teal-800 flex items-center justify-center font-semibold">
+                {filteredSections.reduce((acc, section) =>
+                  acc + section.items.filter(item => item.type === 'Automated').length, 0)}
+              </div>
+              <div>
+                <p className="text-xs text-teal-800">Automated</p>
+                <p className="text-sm font-semibold text-teal-900">Ready to scan</p>
+              </div>
             </div>
-            <div className="flex items-center space-x-2">
-              <div className="w-3 h-3 bg-yellow-600 rounded-full"></div>
-              <span className="text-sm text-gray-600">
-                Manual: {filteredSections.reduce((acc, section) =>
-                  acc + section.items.filter(item => item.type === 'Manual').length, 0)} controls
-              </span>
+            <div className="flex items-center gap-3 rounded-xl border border-amber-300 bg-amber-100 px-4 py-3">
+              <div className="w-10 h-10 rounded-full bg-amber-200 text-amber-800 flex items-center justify-center font-semibold">
+                {filteredSections.reduce((acc, section) =>
+                  acc + section.items.filter(item => item.type === 'Manual').length, 0)}
+              </div>
+              <div>
+                <p className="text-xs text-amber-700">Manual</p>
+                <p className="text-sm font-semibold text-amber-900">Requires review</p>
+              </div>
             </div>
           </div>
         </div>
@@ -539,6 +722,10 @@ export const BenchmarkDashboard: React.FC = () => {
         onClose={() => setIsRemediationModalOpen(false)}
         onConfirm={confirmRemediation}
         checkIds={remediationCheckIds}
+        checkDetails={remediationCheckIds.map(id => {
+          const item = sections.flatMap(s => s.items).find(i => i.id === id);
+          return { checkId: id, remediation: item?.remediation };
+        })}
         isLoading={isRemediating}
         results={remediationResults}
       />

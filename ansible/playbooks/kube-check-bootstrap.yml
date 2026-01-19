@@ -1,0 +1,166 @@
+---
+# Optimized Bootstrap Kube-check on K8s nodes
+- name: Bootstrap Kube-check on K8s Cluster (Optimized)
+  hosts: "{{ node_name | default('all') }}"
+  gather_facts: no
+
+  vars:
+    kubecheck_path_remote: "{{ kubecheck_path | default('/home/' + ansible_user + '/Kube-check') }}"
+    reports_path_remote: "{{ reports_path | default(kubecheck_path_remote + '/reports') }}"
+    # kubecheck_path_local is passed via extra_vars from Python code
+
+  tasks:
+    # ==========================================================
+    # CLEAR SSH CACHE (fix host key verification issues)
+    # ==========================================================
+    - name: Clear SSH known_hosts and ControlMaster sockets
+      shell: |
+        rm -f ~/.ssh/known_hosts
+        rm -f /tmp/ansible-ssh-*
+        rm -f /root/.ssh/known_hosts
+        echo "SSH cache cleared"
+      delegate_to: localhost
+      become: no
+      changed_when: false
+      failed_when: false
+
+    # ==========================================================
+    # TIMING START
+    # ==========================================================
+    - name: Record start time
+      set_fact:
+        timing_start: "{{ lookup('pipe', 'date +%s') }}"
+
+    # ==========================================================
+    # VERIFY LOCAL SOURCE
+    # ==========================================================
+    - name: Set default kubecheck_path_local if not provided
+      set_fact:
+        kubecheck_path_local: "{{ kubecheck_path_local | default('/app/Kube-check') }}"
+      when: kubecheck_path_local is not defined or kubecheck_path_local == ""
+
+    - name: Verify local Kube-check directory exists
+      stat:
+        path: "{{ kubecheck_path_local }}"
+      delegate_to: localhost
+      register: local_src
+
+    - name: Fail if local Kube-check directory missing
+      fail:
+        msg: "Local Kube-check directory not found: {{ kubecheck_path_local }}"
+      when: not local_src.stat.exists
+      delegate_to: localhost
+
+    # ==========================================================
+    # ENSURE REMOTE DIRECTORIES
+    # ==========================================================
+    - name: Ensure remote directories exist
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+      loop:
+        - "{{ kubecheck_path_remote }}"
+        - "{{ reports_path_remote }}"
+
+    # ==========================================================
+    # CODE SYNC (FAST RSYNC)
+    # ==========================================================
+    - name: Get SSH connection info from inventory
+      set_fact:
+        ssh_key_path: "{{ hostvars[inventory_hostname]['ansible_ssh_private_key_file'] | default('') }}"
+        ssh_user: "{{ hostvars[inventory_hostname]['ansible_user'] | default('root') }}"
+        ssh_host: "{{ hostvars[inventory_hostname]['ansible_host'] | default(inventory_hostname) }}"
+    - name: Record pre-copy time
+      set_fact:
+        timing_pre_copy: "{{ lookup('pipe', 'date +%s') }}"
+    - name: Sync Kube-check source code (optimized)
+      shell: |
+        rsync --archive --delete --size-only --omit-dir-times --no-perms --no-owner --no-group \
+          --exclude=reports --exclude=venv --exclude=__pycache__ --exclude=.git \
+          -e "ssh -i {{ ssh_key_path }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o CheckHostIP=no -o LogLevel=ERROR" \
+          {{ kubecheck_path_local }}/ \
+          {{ ssh_user }}@{{ ssh_host }}:{{ kubecheck_path_remote }}/
+      delegate_to: localhost
+      become: no
+      register: rsync_result
+      changed_when: true
+    - name: Record post-copy time
+      set_fact:
+        timing_copy_duration: "{{ (lookup('pipe', 'date +%s') | int) - (timing_pre_copy | int) }}"
+
+    # ==========================================================
+    # PYTHON VENV
+    # ==========================================================
+    - name: Check if venv exists
+      stat:
+        path: "{{ kubecheck_path_remote }}/venv"
+      register: venv_stat
+
+    - name: Create virtualenv (first time only)
+      command: python3 -m venv venv
+      args:
+        chdir: "{{ kubecheck_path_remote }}"
+        creates: "{{ kubecheck_path_remote }}/venv"
+      when: not venv_stat.stat.exists
+
+    # ==========================================================
+    # CHECK IF REQUIREMENTS CHANGED (FAST)
+    # ==========================================================
+    - name: Check if requirements.txt changed
+      shell: |
+        if [ ! -f venv/.requirements_mtime ]; then
+          exit 1
+        fi
+        test "$(stat -c %Y requirements.txt)" = "$(cat venv/.requirements_mtime)"
+      args:
+        chdir: "{{ kubecheck_path_remote }}"
+      register: req_check
+      failed_when: false
+      changed_when: false
+
+    - name: Record pre-install time
+      set_fact:
+        timing_pre_install: "{{ lookup('pipe', 'date +%s') }}"
+
+    # ==========================================================
+    # INSTALL DEPENDENCIES (ONLY IF NEEDED)
+    # ==========================================================
+    - name: Install Python dependencies
+      pip:
+        requirements: "{{ kubecheck_path_remote }}/requirements.txt"
+        virtualenv: "{{ kubecheck_path_remote }}/venv"
+        extra_args: "--cache-dir {{ kubecheck_path_remote }}/.pip-cache"
+      when: req_check.rc != 0
+
+    - name: Save requirements mtime
+      shell: |
+        stat -c %Y requirements.txt > venv/.requirements_mtime
+      args:
+        chdir: "{{ kubecheck_path_remote }}"
+      when: req_check.rc != 0
+
+    - name: Record post-install time
+      set_fact:
+        timing_install_duration: "{{ (lookup('pipe', 'date +%s') | int) - (timing_pre_install | int) }}"
+
+    # ==========================================================
+    # TIMING END + SUMMARY
+    # ==========================================================
+    - name: Calculate total timing
+      set_fact:
+        timing_total: "{{ (lookup('pipe', 'date +%s') | int) - (timing_start | int) }}"
+
+    - name: Bootstrap summary
+      debug:
+        msg:
+          - "✅ Kube-check bootstrap completed on {{ inventory_hostname }}"
+          - "Path: {{ kubecheck_path_remote }}"
+          - "Venv: {{ kubecheck_path_remote }}/venv"
+          - "Reports: {{ reports_path_remote }}"
+          - "=== TIMING ==="
+          - "Copy time: {{ timing_copy_duration | default(0) }}s"
+          - "Install deps time: {{ timing_install_duration | default(0) }}s"
+          - "Total time: {{ timing_total }}s"

@@ -1,0 +1,76 @@
+version: '3.8'
+services:
+  # Frontend Service - React Application
+  frontend:
+    # Use pre-built image from Docker Hub
+    image: seipieh/kubecheck-frontend:v1
+    container_name: kube-check-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://unified-backend:3001
+      - NODE_ENV=production
+    depends_on:
+      - unified-backend
+    networks:
+      - kube-check-network
+    restart: unless-stopped
+  # Unified Backend - Flask (Backend + Kube-check + Ansible)
+  unified-backend:
+    # Use pre-built image from Docker Hub
+    image: seipieh/kubecheck-unified-backend:v1
+    container_name: kube-check-unified-backend
+    ports:
+      - "3001:3001"
+    env_file:
+      - .env
+    environment:
+      - FLASK_ENV=production
+      - PORT=3001
+      - IP=0.0.0.0
+      - K8S_MODE=remote
+      - CLUSTER_NAME=default
+      - KUBE_CHECK_PATH=/app/Kube-check
+      - ANSIBLE_DIR=/app/ansible
+      - ANSIBLE_HOST_KEY_CHECKING=False
+      - ANSIBLE_SSH_ARGS=-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+      - ANSIBLE_CONFIG=/app/ansible/ansible.cfg
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # App code for Kube-check + configs/playbooks
+      - ./Kube-check:/app/Kube-check
+      - ./ansible:/app/ansible
+      - ./ansible/ssh_keys:/app/ansible/ssh_keys:ro
+      # MCP Bot policies directory
+      - ./policies:/app/policies:ro
+      # Reports output (HTML/JSON) - persists across restarts
+      - kube-check-reports:/app/Kube-check/reports
+      # Logs + SQLite data
+      - ansible-logs:/app/logs
+      - kube-check-data:/app/data  # SQLite database persistence
+      # Mount host paths if running on K8s node (for privileged access)
+      - /etc/kubernetes:/etc/kubernetes:ro
+      - /var/lib/etcd:/var/lib/etcd:ro
+      - /var/lib/kubelet:/var/lib/kubelet:ro
+      - /usr/bin:/usr/bin:ro
+      - /etc/systemd:/etc/systemd:ro
+    networks:
+      - kube-check-network
+    restart: unless-stopped
+volumes:
+  kube-check-reports:
+    driver: local
+  kubeconfig:
+    driver: local
+  ansible-logs:
+    driver: local
+  kube-check-data:
+    driver: local  # Persistent storage for SQLite database
+networks:
+  kube-check-network:
+    driver: bridge
+
+
+
+
+

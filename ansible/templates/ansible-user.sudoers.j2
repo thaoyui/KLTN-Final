@@ -1,0 +1,48 @@
+# Ansible user - Limited sudo access for kube-check operations
+# Based on analysis of kube-check code and config files
+# Generated from: docs/KUBE_CHECK_SUDOERS_COMMANDS.md
+
+# Shell commands (required for audit scripts)
+{{ ansible_username }} ALL=(ALL) NOPASSWD: /bin/sh, /bin/bash
+
+# File operations (check)
+{{ ansible_username }} ALL=(ALL) NOPASSWD: /bin/cat, /usr/bin/stat, /usr/bin/find, /usr/bin/test
+
+# Process operations (check)
+{{ ansible_username }} ALL=(ALL) NOPASSWD: /bin/ps
+
+# Text processing (check and remediation)
+{{ ansible_username }} ALL=(ALL) NOPASSWD: /usr/bin/grep, /usr/bin/awk, /usr/bin/sed, /usr/bin/xargs
+
+# File permissions & ownership (remediation)
+{{ ansible_username }} ALL=(ALL) NOPASSWD: /usr/bin/chmod, /usr/bin/chown
+
+# File editing (remediation)
+{{ ansible_username }} ALL=(ALL) NOPASSWD: /usr/bin/mkdir, /usr/bin/rm, /usr/bin/cp, /usr/bin/mv
+
+# Service management (remediation)
+{{ ansible_username }} ALL=(ALL) NOPASSWD: /bin/systemctl, /usr/bin/systemctl
+
+# Kubernetes commands (policies section - master nodes only)
+# Remove this line for worker nodes
+{{ ansible_username }} ALL=(ALL) NOPASSWD: /usr/bin/kubectl
+
+# JSON processing (with kubectl)
+# Remove this line for worker nodes
+{{ ansible_username }} ALL=(ALL) NOPASSWD: /usr/bin/jq
+
+# Utilities
+{{ ansible_username }} ALL=(ALL) NOPASSWD: /bin/echo, /usr/bin/which
+
+# Python (for kube-check execution)
+{{ ansible_username }} ALL=(ALL) NOPASSWD: /usr/bin/python3, /usr/bin/pip3, /usr/bin/python3.*
+
+# Package management (for bootstrap/installation)
+{{ ansible_username }} ALL=(ALL) NOPASSWD: /usr/bin/apt, /usr/bin/apt-get, /usr/bin/apt-cache
+
+# File transfer (for bootstrap)
+{{ ansible_username }} ALL=(ALL) NOPASSWD: /usr/bin/rsync, /usr/bin/scp
+
+# Disable requiretty for Ansible
+Defaults:{{ ansible_username }} !requiretty
+

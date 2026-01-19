@@ -203,17 +203,13 @@ class CheckExecutor:
         """Execute audit command with enhanced variable substitution"""
         if not audit_cmd:
             return ""
-        
         try:
             # Handle multi-line audit commands (like in policies)
             if '\n' in audit_cmd:
                 return self._execute_multiline_audit(audit_cmd, component_type)
-            
             # Substitute variables
             substituted_cmd = self._substitute_variables(audit_cmd, component_type)
-            
             self.logger.debug(f"Executing: {substituted_cmd}")
-            
             # Execute command
             result = subprocess.run(
                 substituted_cmd,
@@ -222,12 +218,9 @@ class CheckExecutor:
                 text=True,
                 timeout=60
             )
-            
             if result.returncode != 0 and result.returncode != 1:
                 self.logger.debug(f"Command returned {result.returncode}: {result.stderr}")
-            
             return result.stdout
-            
         except subprocess.TimeoutExpired:
             self.logger.error("Audit command timed out")
             return ""

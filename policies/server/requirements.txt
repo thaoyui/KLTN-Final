@@ -1,0 +1,9 @@
+flask
+flask-cors
+pydantic
+PyGithub
+PyYAML
+google-generativeai
+openai
+kubernetes
+python-dotenv
